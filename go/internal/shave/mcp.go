@@ -58,7 +58,7 @@ func handleMCP(req mcpRequest) map[string]interface{} {
 			},
 			"serverInfo": map[string]interface{}{
 				"name":    "shave",
-				"version": version,
+				"version": Version,
 			},
 		})
 	case "tools/list":

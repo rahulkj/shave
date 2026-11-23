@@ -45,7 +45,7 @@ func Main(args []string) int {
 	}
 	switch args[0] {
 	case "version", "--version", "-v":
-		fmt.Printf("shave %s\n", version)
+		fmt.Printf("shave %s\n", Version)
 		return 0
 	case "help", "-h", "--help":
 		fmt.Print(helpText)
@@ -70,4 +70,6 @@ func Main(args []string) int {
 	}
 }
 
-var version = "0.1.0"
+var Version = "0.1.0"
+var Commit = "dev"
+var Date = "unknown"
