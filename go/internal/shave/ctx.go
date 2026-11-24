@@ -2,7 +2,6 @@ package shave
 
 import (
 	"bufio"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -23,54 +22,19 @@ func cmdCtx(args []string) int {
 	query := fs.String("q", "", "query to focus on")
 	budget := fs.Int("budget", 6000, "max output chars")
 	contextN := fs.Int("context", 4, "context lines around matches")
+	mapOnly := fs.Bool("map", false, "emit a compact outline (file -> declarations)")
 	jsonOut := fs.Bool("json", false, "json output")
-	_ = fs.Parse(args)
-	paths := fs.Args()
+	paths := parseFlagsInterspersed(fs, args)
 	if len(paths) == 0 {
 		paths = []string{"."}
 	}
 
-	// collect files
-	var files []string
-	for _, p := range paths {
-		info, err := os.Stat(p)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "shave:", err)
-			continue
-		}
-		if !info.IsDir() {
-			files = append(files, p)
-			continue
-		}
-		filepath.Walk(p, func(fp string, fi os.FileInfo, err error) error {
-			if err != nil {
-				return nil
-			}
-			if fi.IsDir() {
-				base := fi.Name()
-				if base == ".git" || base == "node_modules" || base == "vendor" || base == ".idea" || base == "dist" || base == "build" {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if fi.Size() > 200*1024 {
-				return nil
-			}
-			ext := filepath.Ext(fp)
-			if ext == "" {
-				// include Dockerfile
-				if strings.Contains(fi.Name(), "Dockerfile") {
-					ext = ".Dockerfile"
-				}
-			}
-			if !ctxExts[ext] {
-				return nil
-			}
-			files = append(files, fp)
-			return nil
-		})
+	files := collectFiles(paths)
+
+	if *mapOnly {
+		fmt.Print(codeMap(files, *budget))
+		return 0
 	}
-	sort.Strings(files)
 
 	if *query == "" {
 		// tree + top-level declarations
@@ -110,53 +74,12 @@ func cmdCtx(args []string) int {
 		if err != nil {
 			continue
 		}
-		lines := strings.Split(string(b), "\n")
-		var matches []int
-		for i, l := range lines {
-			lc := strings.ToLower(l)
-			for _, t := range tokens {
-				if strings.Contains(lc, t) {
-					matches = append(matches, i)
-					break
-				}
-			}
-		}
-		if len(matches) == 0 {
+		body := querySnippets(string(b), tokens, *contextN, *budget)
+		if body == "" {
 			continue
 		}
-		// build ranges
-		type rng struct{ s, e int }
-		var ranges []rng
-		for _, m := range matches {
-			s := m - *contextN
-			if s < 0 {
-				s = 0
-			}
-			e := m + *contextN
-			if e >= len(lines) {
-				e = len(lines) - 1
-			}
-			ranges = append(ranges, rng{s, e})
-		}
-		// merge
-		var merged []rng
-		for _, r := range ranges {
-			if len(merged) == 0 || r.s > merged[len(merged)-1].e+1 {
-				merged = append(merged, r)
-			} else {
-				if r.e > merged[len(merged)-1].e {
-					merged[len(merged)-1].e = r.e
-				}
-			}
-		}
 		header := "## " + f + "\n"
-		chunk := header
-		for _, r := range merged {
-			for i := r.s; i <= r.e; i++ {
-				chunk += fmt.Sprintf("%4d: %s\n", i+1, lines[i])
-			}
-			chunk += "---\n"
-		}
+		chunk := header + body
 		if used+len(chunk) > *budget {
 			if used < *budget {
 				rem := *budget - used
@@ -175,14 +98,153 @@ func cmdCtx(args []string) int {
 		out = "(no matches)\n"
 	}
 	if *jsonOut {
-		enc := json.NewEncoder(os.Stdout)
-		// simple object
-		enc.SetIndent("", "  ")
-		enc.Encode(map[string]interface{}{"query": *query, "budget": *budget, "output": out})
+		writeJSON(map[string]interface{}{"query": *query, "budget": *budget, "output": out})
 		return 0
 	}
 	fmt.Print(out)
 	return 0
+}
+
+// collectFiles walks paths and returns the sorted list of source/config files
+// worth feeding to a model. Shared with the github command so file-selection
+// rules exist in exactly one place.
+func collectFiles(paths []string, extraExts ...string) []string {
+	allowed := make(map[string]bool, len(ctxExts)+len(extraExts))
+	for ext, ok := range ctxExts {
+		allowed[ext] = ok
+	}
+	for _, ext := range extraExts {
+		allowed[ext] = true
+	}
+	var files []string
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "shave:", err)
+			continue
+		}
+		if !info.IsDir() {
+			files = append(files, p)
+			continue
+		}
+		filepath.Walk(p, func(fp string, fi os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if fi.IsDir() {
+				base := fi.Name()
+				if base == ".git" || base == "node_modules" || base == "vendor" || base == ".idea" || base == "dist" || base == "build" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if fi.Size() > 200*1024 {
+				return nil
+			}
+			ext := filepath.Ext(fp)
+			if ext == "" {
+				// include Dockerfile
+				if strings.Contains(fi.Name(), "Dockerfile") {
+					ext = ".Dockerfile"
+				}
+			}
+			if !allowed[ext] {
+				return nil
+			}
+			files = append(files, fp)
+			return nil
+		})
+	}
+	sort.Strings(files)
+	return files
+}
+
+// querySnippets returns numbered matching lines plus context for one file.
+// Shared by `ctx -q` and `shave github --find`.
+func querySnippets(content string, tokens []string, contextN, budget int) string {
+	lines := strings.Split(content, "\n")
+	var matches []int
+	for i, l := range lines {
+		lc := strings.ToLower(l)
+		for _, t := range tokens {
+			if strings.Contains(lc, t) {
+				matches = append(matches, i)
+				break
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return ""
+	}
+	type rng struct{ s, e int }
+	var ranges []rng
+	for _, m := range matches {
+		s, e := m-contextN, m+contextN
+		if s < 0 {
+			s = 0
+		}
+		if e >= len(lines) {
+			e = len(lines) - 1
+		}
+		ranges = append(ranges, rng{s, e})
+	}
+	var merged []rng
+	for _, r := range ranges {
+		if len(merged) == 0 || r.s > merged[len(merged)-1].e+1 {
+			merged = append(merged, r)
+		} else if r.e > merged[len(merged)-1].e {
+			merged[len(merged)-1].e = r.e
+		}
+	}
+	var b strings.Builder
+	for _, r := range merged {
+		for i := r.s; i <= r.e; i++ {
+			fmt.Fprintf(&b, "%4d: %s\n", i+1, lines[i])
+		}
+		b.WriteString("---\n")
+	}
+	out := b.String()
+	if budget > 0 && len(out) > budget {
+		out = out[:budget] + "\n... [budget reached]\n"
+	}
+	return out
+}
+
+// codeMap is progressive disclosure: a file -> declarations outline that lets
+// an agent ask for specific lines instead of pasting whole files.
+func codeMap(files []string, budget int) string {
+	var b strings.Builder
+	for _, f := range files {
+		decls := extractDecls(f)
+		line := f
+		if len(decls) > 0 {
+			names := decls
+			if len(names) > 5 {
+				names = names[:5]
+			}
+			for i, n := range names {
+				names[i] = trunc(n, 60)
+			}
+			line += fmt.Sprintf(" (%d decls): %s", len(decls), strings.Join(names, " | "))
+		}
+		line = trunc(line, 300)
+		if b.Len()+len(line) > budget && budget > 0 {
+			b.WriteString("... [budget reached]\n")
+			break
+		}
+		b.WriteString(line + "\n")
+	}
+	return b.String()
+}
+
+func isDeclaration(s string) bool {
+	low := strings.ToLower(strings.TrimSpace(s))
+	for _, prefix := range []string{"func ", "type ", "class ", "def ", "interface ", "struct ", "resource ", "module ", "const "} {
+		if strings.HasPrefix(low, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractDecls(path string) []string {
@@ -196,15 +258,8 @@ func extractDecls(path string) []string {
 	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for sc.Scan() {
 		l := strings.TrimSpace(sc.Text())
-		low := strings.ToLower(l)
-		if strings.HasPrefix(low, "func ") || strings.HasPrefix(low, "type ") ||
-			strings.HasPrefix(low, "class ") || strings.HasPrefix(low, "def ") ||
-			strings.HasPrefix(low, "interface ") || strings.HasPrefix(low, "struct ") ||
-			strings.HasPrefix(low, "resource ") || strings.HasPrefix(low, "module ") ||
-			strings.HasPrefix(low, "const ") {
-			if len(l) < 240 {
-				out = append(out, l)
-			}
+		if isDeclaration(l) && len(l) < 240 {
+			out = append(out, l)
 		}
 	}
 	return out

@@ -1,7 +1,6 @@
 package shave
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -20,6 +19,14 @@ var modelPrices = map[string]float64{
 	"gemini-2.5-pro":   1.25,
 	"gemini-2.5-flash": 0.075,
 	"local":            0.00,
+}
+
+// tokenCount is the shared ~4 chars/token estimate used by pack and reports.
+func tokenCount(s string) int {
+	if len(s) == 0 {
+		return 0
+	}
+	return (len(s) + 3) / 4
 }
 
 func cmdTokens(args []string) int {
@@ -45,11 +52,7 @@ func cmdTokens(args []string) int {
 	}
 	text := string(b)
 	chars := len(text)
-	// rough token estimate: ~4 chars per token for English code.
-	toks := (chars + 3) / 4
-	if chars == 0 {
-		toks = 0
-	}
+	toks := tokenCount(text)
 	price, ok := modelPrices[*model]
 	if !ok {
 		price = 3.00
@@ -69,9 +72,7 @@ func cmdTokens(args []string) int {
 			"model":  *model,
 			"usd":    cost,
 		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		enc.Encode(out)
+		writeJSON(out)
 		return 0
 	}
 	fmt.Printf("chars:   %d\n", chars)

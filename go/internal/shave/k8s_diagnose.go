@@ -1,10 +1,8 @@
 package shave
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -82,9 +80,7 @@ func cmdK8sDiagnose(args []string) int {
 	}
 
 	if *jsonOut {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		enc.Encode(map[string]interface{}{
+		writeJSON(map[string]interface{}{
 			"kind":     kind,
 			"name":     name,
 			"describe": descLines,

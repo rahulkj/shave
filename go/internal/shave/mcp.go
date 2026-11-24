@@ -1,14 +1,21 @@
 package shave
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// mcpCacheTTL keeps repeated agent calls cheap without serving stale results.
+const mcpCacheTTL = 5 * time.Minute
 
 type mcpRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -186,6 +193,70 @@ func mcpTools() []mcpTool {
 					"paths":  strProp("Comma-separated file or directory paths"),
 					"query":  strProp("Topic query to focus on (optional)"),
 					"budget": intProp("Max output chars"),
+					"map":    boolProp("Emit a compact file -> declarations outline"),
+				},
+				"required": []string{"paths"},
+			},
+		},
+		{
+			Name:        "shave_github",
+			Description: "Analyze local git clones: inventory, shared patterns, version skew, duplication and repeated fixes.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"paths":     strProp("Comma-separated directories to search for git repos (default cwd)"),
+					"depth":     intProp("How deep below each path to search (default 2)"),
+					"top":       intProp("Rows per commonality section"),
+					"max":       intProp("Max repos/duplicates to print"),
+					"owner":     strProp("Only include repos whose origin owner matches"),
+					"find":      strProp("Search declarations/docs across all repos"),
+					"profile":   boolProp("Emit a compact house-style profile"),
+					"audit":     boolProp("Report secret/hygiene findings (paths only)"),
+					"near":      boolProp("Cluster near-duplicate files"),
+					"fixes":     boolProp("Mine git log for repeated fixes"),
+					"since":     boolProp("Show only what changed since the last run"),
+					"refresh":   boolProp("Ignore the cached previous report"),
+					"fromStdin": boolProp("Read gh API JSON from the text argument"),
+					"text":      strProp("gh API JSON when fromStdin is set"),
+					"json":      boolProp("JSON output"),
+				},
+			},
+		},
+		{
+			Name:        "shave_test",
+			Description: "Test output: hide passing lines, keep failures with context.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"text":    strProp("Raw test output"),
+					"context": intProp("Context lines around failures"),
+					"max":     intProp("Max output lines"),
+				},
+				"required": []string{"text"},
+			},
+		},
+		{
+			Name:        "shave_diff",
+			Description: "Compress a unified diff; review mode keeps only declaration/secret/TODO changes.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"text":   strProp("Raw unified diff"),
+					"review": boolProp("Only changes that matter for review"),
+					"max":    intProp("Max output lines"),
+				},
+				"required": []string{"text"},
+			},
+		},
+		{
+			Name:        "shave_pack",
+			Description: "Fit the most relevant code context into a token budget.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"paths":  strProp("Comma-separated file or directory paths"),
+					"query":  strProp("Query used to rank lines"),
+					"budget": intProp("Max output tokens"),
 				},
 				"required": []string{"paths"},
 			},
@@ -244,6 +315,9 @@ func callMCPTool(name string, args map[string]interface{}) (string, bool) {
 		if v := intArg(args, "budget"); v > 0 {
 			argsCLI = append(argsCLI, "--budget", strconv.Itoa(v))
 		}
+		if boolArg(args, "map") {
+			argsCLI = append(argsCLI, "--map")
+		}
 		paths := strArg(args, "paths")
 		for _, p := range strings.Split(paths, ",") {
 			p = strings.TrimSpace(p)
@@ -252,6 +326,76 @@ func callMCPTool(name string, args map[string]interface{}) (string, bool) {
 			}
 		}
 		return runShave(argsCLI, "")
+	case "shave_test":
+		argsCLI := []string{"test"}
+		if v := intArg(args, "context"); v > 0 {
+			argsCLI = append(argsCLI, "--context", strconv.Itoa(v))
+		}
+		if v := intArg(args, "max"); v > 0 {
+			argsCLI = append(argsCLI, "--max", strconv.Itoa(v))
+		}
+		return runShave(argsCLI, strArg(args, "text"))
+	case "shave_diff":
+		argsCLI := []string{"diff"}
+		if boolArg(args, "review") {
+			argsCLI = append(argsCLI, "--review")
+		}
+		if v := intArg(args, "max"); v > 0 {
+			argsCLI = append(argsCLI, "--max", strconv.Itoa(v))
+		}
+		return runShave(argsCLI, strArg(args, "text"))
+	case "shave_pack":
+		argsCLI := []string{"pack"}
+		if q := strArg(args, "query"); q != "" {
+			argsCLI = append(argsCLI, "-q", q)
+		}
+		if v := intArg(args, "budget"); v > 0 {
+			argsCLI = append(argsCLI, "--budget", strconv.Itoa(v))
+		}
+		for _, p := range strings.Split(strArg(args, "paths"), ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				argsCLI = append(argsCLI, p)
+			}
+		}
+		return runShave(argsCLI, "")
+	case "shave_github":
+		argsCLI := []string{"github"}
+		if v := intArg(args, "depth"); v > 0 {
+			argsCLI = append(argsCLI, "--depth", strconv.Itoa(v))
+		}
+		if v := intArg(args, "top"); v > 0 {
+			argsCLI = append(argsCLI, "--top", strconv.Itoa(v))
+		}
+		if v := intArg(args, "max"); v > 0 {
+			argsCLI = append(argsCLI, "--max", strconv.Itoa(v))
+		}
+		if o := strArg(args, "owner"); o != "" {
+			argsCLI = append(argsCLI, "--owner", o)
+		}
+		if f := strArg(args, "find"); f != "" {
+			argsCLI = append(argsCLI, "--find", f)
+		}
+		for _, f := range []struct{ key, flag string }{
+			{"profile", "--profile"}, {"audit", "--audit"}, {"near", "--near"},
+			{"fixes", "--fixes"}, {"since", "--since"}, {"refresh", "--refresh"},
+			{"fromStdin", "--from-stdin"}, {"json", "--json"},
+		} {
+			if boolArg(args, f.key) {
+				argsCLI = append(argsCLI, f.flag)
+			}
+		}
+		stdin := ""
+		if boolArg(args, "fromStdin") {
+			stdin = strArg(args, "text")
+		}
+		for _, p := range strings.Split(strArg(args, "paths"), ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				argsCLI = append(argsCLI, p)
+			}
+		}
+		return runShave(argsCLI, stdin)
 	default:
 		return "unknown tool: " + name, true
 	}
@@ -262,6 +406,26 @@ func runShave(args []string, stdin string) (string, bool) {
 	if err != nil {
 		return err.Error(), true
 	}
+	cacheable := true
+	for _, a := range args {
+		if a == "--refresh" || a == "--since" {
+			cacheable = false
+		}
+	}
+	key := sha256.Sum256([]byte(exe + "\x00" + strings.Join(args, "\x00") + "\x00" + stdin))
+	id := hex.EncodeToString(key[:])[:16]
+	dir := filepath.Join(cacheRoot(), "mcp")
+	outPath, timePath := filepath.Join(dir, id+".out"), filepath.Join(dir, id+".time")
+	if cacheable {
+		if b, err := os.ReadFile(outPath); err == nil && len(b) > 0 {
+			if raw, err := os.ReadFile(timePath); err == nil {
+				if ts, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); err == nil &&
+					time.Since(time.Unix(ts, 0)) < mcpCacheTTL {
+					return "[unchanged: cached MCP result]\n", false
+				}
+			}
+		}
+	}
 	cmd := exec.Command(exe, args...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
@@ -270,7 +434,25 @@ func runShave(args []string, stdin string) (string, bool) {
 	if err != nil {
 		return strings.TrimSpace(string(out)) + "\n" + err.Error(), true
 	}
+	if cacheable && os.MkdirAll(dir, 0o755) == nil {
+		_ = os.WriteFile(outPath, out, 0o644)
+		_ = os.WriteFile(timePath, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o644)
+		pruneMCPCache(dir)
+	}
 	return string(out), false
+}
+
+func pruneMCPCache(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) <= 200 {
+		return
+	}
+	cutoff := time.Now().Add(-mcpCacheTTL)
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil && info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }
 
 func strArg(m map[string]interface{}, k string) string {

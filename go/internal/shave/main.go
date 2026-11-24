@@ -16,16 +16,20 @@ comes out.
 
   tokens [file] [-m model]      Count tokens (approx chars/4) and est. cost
   logs [file]                   Compress a log stream (dedupe, redact, focus)
+  test [file]                   Test output: hide passes, keep failures + context
+  diff [file] [--review]        Compress a unified diff (--review: changes that matter)
+  pack <paths...> [-q query]    Fit the most relevant context into a token budget
   k8s pods [-n ns]             Compact pod status table
   k8s events [-n ns]            Dedup + compact events
   k8s diagnose <kind/name>      Gather status/events/logs into one report
-  ctx <paths...> [-q query]     Prune code context to relevant snippets
+  ctx <paths...> [-q query]     Prune code context to relevant snippets (--map: outline)
   cache get <key>               Read a cached entry
   cache set <key>              Write a cached entry from stdin
   cache stats                   Cache size + hit counts
   cache clear                  Clear cache
 
   run -- <cmd>                 Run cmd, cache output, print diff on repeat
+  github [paths...]            Analyze local git clones: inventory, shared patterns, duplicates
   mcp                          Run as an MCP server (stdio JSON-RPC)
 
 Flags (most commands): --json, --max, --terse, --redact/--no-redact
@@ -36,6 +40,12 @@ Examples:
   kubectl get pods -A -o json | shave k8s pods --json
   shave ctx ./src -q "retry logic" --budget 2000
   git diff | shave tokens
+  go test ./... | shave test
+  git diff | shave diff --review
+  shave pack ./src -q "retry logic" --budget 3000
+  shave github ~/src --depth 2 --top 10
+  shave github ~/src --find "retry logic"
+  shave github ~/src --profile
 `
 
 func Main(args []string) int {
@@ -54,6 +64,12 @@ func Main(args []string) int {
 		return cmdTokens(args[1:])
 	case "logs":
 		return cmdLogs(args[1:])
+	case "test":
+		return cmdTest(args[1:])
+	case "diff":
+		return cmdDiff(args[1:])
+	case "pack":
+		return cmdPack(args[1:])
 	case "k8s":
 		return cmdK8s(args[1:])
 	case "ctx":
@@ -62,6 +78,8 @@ func Main(args []string) int {
 		return cmdCache(args[1:])
 	case "run":
 		return cmdRun(args[1:])
+	case "github":
+		return cmdGithub(args[1:])
 	case "mcp":
 		return cmdMCP(args[1:])
 	default:
@@ -70,6 +88,6 @@ func Main(args []string) int {
 	}
 }
 
-var Version = "0.1.0"
+var Version = "0.2.0"
 var Commit = "dev"
 var Date = "unknown"

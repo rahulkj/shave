@@ -2,7 +2,6 @@ package shave
 
 import (
 	"bufio"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -79,13 +78,42 @@ func cmdLogs(args []string) int {
 		lines = append(lines, sc.Text())
 	}
 
+	final, linesIn, omitted := processLogs(lines, *errorsOnly, *contextN, *maxLines, !*noRedact)
+
+	if *jsonOut {
+		out := map[string]interface{}{
+			"lines_in":  linesIn,
+			"lines_out": len(final),
+			"omitted":   omitted,
+			"output":    final,
+		}
+		writeJSON(out)
+		return 0
+	}
+	for _, l := range final {
+		fmt.Println(l)
+	}
+	if omitted > 0 {
+		fmt.Fprintf(os.Stderr, "shave: %d more lines omitted (use --max)\n", omitted)
+	}
+	if linesIn > 0 {
+		ratio := float64(len(final)) / float64(linesIn) * 100
+		fmt.Fprintf(os.Stderr, "shave: %d -> %d lines (%.0f%%)\n", linesIn, len(final), ratio)
+	}
+	return 0
+}
+
+// processLogs is the shared compression pipeline: error-focused filtering,
+// redaction, truncation, consecutive-dupe collapsing and a hard line cap.
+// Every filter command (logs, test, diff) calls this rather than copying it.
+func processLogs(lines []string, errorsOnly bool, contextN, max int, redact bool) (final []string, linesIn, omitted int) {
+	linesIn = len(lines)
 	outLines := []string{}
-	if *errorsOnly {
-		// mark interesting + context
+	if errorsOnly {
 		keep := make([]bool, len(lines))
 		for i, l := range lines {
 			if isInteresting(l) {
-				for j := i - *contextN; j <= i+*contextN; j++ {
+				for j := i - contextN; j <= i+contextN; j++ {
 					if j >= 0 && j < len(lines) {
 						keep[j] = true
 					}
@@ -100,9 +128,6 @@ func cmdLogs(args []string) int {
 	} else {
 		outLines = lines
 	}
-
-	// redact + truncate + collapse consecutive dupes
-	redact := !*noRedact
 	type runItem struct {
 		text  string
 		count int
@@ -120,9 +145,6 @@ func cmdLogs(args []string) int {
 			collapsed = append(collapsed, runItem{text: t, count: 1})
 		}
 	}
-
-	// build final strings
-	var final []string
 	for _, it := range collapsed {
 		if it.count > 1 {
 			final = append(final, fmt.Sprintf("%s   (x%d)", it.text, it.count))
@@ -130,36 +152,9 @@ func cmdLogs(args []string) int {
 			final = append(final, it.text)
 		}
 	}
-
-	// cap
-	omitted := 0
-	if len(final) > *maxLines {
-		omitted = len(final) - *maxLines
-		final = final[:*maxLines]
+	if len(final) > max {
+		omitted = len(final) - max
+		final = final[:max]
 	}
-
-	if *jsonOut {
-		out := map[string]interface{}{
-			"lines_in":  len(lines),
-			"lines_out": len(final),
-			"omitted":   omitted,
-			"output":    final,
-		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		enc.Encode(out)
-		return 0
-	}
-	for _, l := range final {
-		fmt.Println(l)
-	}
-	if omitted > 0 {
-		fmt.Fprintf(os.Stderr, "shave: %d more lines omitted (use --max)\n", omitted)
-	}
-	if len(lines) > 0 {
-		memIn := len(lines)
-		ratio := float64(len(final)) / float64(memIn) * 100
-		fmt.Fprintf(os.Stderr, "shave: %d -> %d lines (%.0f%%)\n", memIn, len(final), ratio)
-	}
-	return 0
+	return final, linesIn, omitted
 }

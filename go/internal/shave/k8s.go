@@ -5,23 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"time"
 )
 
 func runKubectl(args ...string) (string, string, int) {
-	cmd := exec.Command("kubectl", args...)
-	out, err := cmd.Output()
-	estr := ""
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			estr = string(ee.Stderr)
-		} else {
-			estr = err.Error()
-		}
-		return string(out), estr, 1
-	}
-	return string(out), "", 0
+	return runCmd("kubectl", args...)
 }
 
 type k8sPodList struct {
@@ -149,9 +137,7 @@ func cmdK8sPods(args []string) int {
 	}
 
 	if *jsonOut {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		enc.Encode(map[string]interface{}{"pods": rows, "count": len(rows)})
+		writeJSON(map[string]interface{}{"pods": rows, "count": len(rows)})
 		return 0
 	}
 	// table
@@ -277,9 +263,7 @@ func cmdK8sEvents(args []string) int {
 		ents = ents[len(ents)-*max:]
 	}
 	if *jsonOut {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		enc.Encode(ents)
+		writeJSON(ents)
 		return 0
 	}
 	fmt.Printf("%-8s %-28s %-26s %s\n", "TYPE", "OBJECT", "REASON", "MESSAGE")
